@@ -1,0 +1,26 @@
+# Copyright 2022 pietro
+# See LICENSE file for licensing details.
+
+# For a complete list of supported options, see:
+# https://juju.is/docs/sdk/metadata-reference
+name: char-operator
+display-name: Character Operator
+description: |
+  Todo
+summary: |
+  Todo
+
+#containers:
+#  char:
+#    resource: char:latest
+
+# TEMPLATE-TODO: each container defined above must specify an oci-image resource
+#resources:
+#  char-image:
+#    type: oci-image
+#    description: OCI image for char
+
+provides:
+  sees:
+    interface: sees
+    limit: 1

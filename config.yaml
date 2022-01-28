@@ -1,0 +1,22 @@
+# Copyright 2022 pietro
+# See LICENSE file for licensing details.
+#
+# TEMPLATE-TODO: change this example to suit your needs.
+# If you don't need a config, you can remove the file entirely.
+# It ties in to the example _on_config_changed handler in src/charm.py
+#
+# Learn more about config at: https://juju.is/docs/sdk/config
+
+options:
+  enemies:
+    default:
+    description: The enemies this char is aware of. ;-separated list of IP:PORT addresses.
+    type: string
+  port:
+    default: 8000
+    description: Port on which this char is available.
+    type: string
+  name:
+    default: hero
+    description: Name of this char. E.g. ork, elf, Legolas, Mark...
+    type: string
