@@ -9,13 +9,13 @@
 
 options:
   enemies:
-    default:
+    default: ''
     description: The enemies this char is aware of. ;-separated list of IP:PORT addresses.
     type: string
   port:
     default: 8000
     description: Port on which this char is available.
-    type: string
+    type: int
   name:
     default: hero
     description: Name of this char. E.g. ork, elf, Legolas, Mark...

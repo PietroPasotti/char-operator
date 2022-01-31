@@ -34,7 +34,7 @@ class CharCharm(CharmBase):
         Learn more about Pebble layers at https://github.com/canonical/pebble
         """
         # Get a reference the container attribute on the PebbleReadyEvent
-        container: Container = self.unit.get_container('char')
+        container = event.workload
         # Define an initial Pebble layer configuration
         pebble_layer = {
             "summary": "char layer",
@@ -54,7 +54,7 @@ class CharCharm(CharmBase):
             },
         }
         # Add initial Pebble config layer using the Pebble API
-        container.add_layer("char", pebble_layer, combine=True)
+        container.add_layer("httpbin", pebble_layer, combine=True)
         # Autostart any services that were defined with startup: enabled
         container.autostart()
         # Learn more about statuses in the SDK docs:
@@ -64,12 +64,12 @@ class CharCharm(CharmBase):
     def _on_config_changed(self, event):
         """ Learn more about config at https://juju.is/docs/sdk/config
         """
-        container: Container = self.unit.get_container('char')
+        container: Container = event.workload
         if container.can_connect():
             layer = {
                 "services": {
                     "char": {
-                        "override": "merge",
+                        "override": "replace",
                         "environment": {
                             "enemies": self.model.config["enemies"],
                             "port": self.model.config["port"],
@@ -79,10 +79,10 @@ class CharCharm(CharmBase):
                 },
             }
 
-            container.add_layer('char', layer, combine=True)
+            container.add_layer('foo', layer, combine=True)
             container.restart("char")
 
-    def _on_war_action(self, _):
+    def _on_war_action(self, event):
         """ Let the bloodbath begin. Throws a pebble at some char, causing it to
         lash out to all other chars in sight, which will retaliate, etc...
         https://juju.is/docs/sdk/actions
@@ -92,7 +92,7 @@ class CharCharm(CharmBase):
         req = request.Request(url, data=data)
         request.urlopen(req)
 
-    def _on_respawn_action(self, _):
+    def _on_respawn_action(self, event):
         """ Revives a dead char.
         """
         container = self.unit.get_container('char')

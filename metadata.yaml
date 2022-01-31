@@ -10,15 +10,15 @@ description: |
 summary: |
   Todo
 
-#containers:
-#  char:
-#    resource: char:latest
+containers:
+  char:
+    resource: char-image
 
-# TEMPLATE-TODO: each container defined above must specify an oci-image resource
-#resources:
-#  char-image:
-#    type: oci-image
-#    description: OCI image for char
+# each container defined above must specify an oci-image resource
+resources:
+  char-image:
+    type: oci-image
+    description: OCI image for char
 
 provides:
   sees:
