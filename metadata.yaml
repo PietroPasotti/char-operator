@@ -24,3 +24,7 @@ provides:
   sees:
     interface: sees
     limit: 1
+
+requires:
+  ingress:
+    interface: ingress

@@ -5,10 +5,11 @@
 import logging
 from urllib import request, parse
 
+from charms.nginx_ingress_integrator.v0.ingress import IngressRequires
 from ops.charm import CharmBase
 # from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus, Container
+from ops.model import ActiveStatus, Container, WaitingStatus
 
 logger = logging.getLogger(__name__)
 
@@ -18,69 +19,63 @@ class CharCharm(CharmBase):
 
     def __init__(self, *args):
         super().__init__(*args)
-        self.framework.observe(self.on.char_pebble_ready, self._on_char_pebble_ready)
         self.framework.observe(self.on.config_changed, self._on_config_changed)
         self.framework.observe(self.on.war_action, self._on_war_action)
         self.framework.observe(self.on.respawn_action, self._on_respawn_action)
 
-    def _on_char_pebble_ready(self, event):
-        """Define and start a workload using the Pebble API.
+        print('inited Char Charm!')
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        You'll need to specify the right entrypoint and environment
-        configuration for your specific workload. Tip: you can see the
-        standard entrypoint of an existing container using docker inspect
+        self.ingress = IngressRequires(self, {
+            "service-hostname": self.app.name,
+            "service-name": self.app.name,
+            "service-port": 8000
+        })
 
-        Learn more about Pebble layers at https://github.com/canonical/pebble
-        """
-        # Get a reference the container attribute on the PebbleReadyEvent
-        container: Container = self.unit.get_container('char')
-        # Define an initial Pebble layer configuration
-        pebble_layer = {
+    def _on_config_changed(self, event):
+        """Handle the config-changed event"""
+        # Get the gosherve container so we can configure/manipulate it
+        container = self.unit.get_container("char")
+        # Create a new config layer
+        layer = self._char_layer()
+
+        if container.can_connect():
+            # Get the current config
+            services = container.get_plan().to_dict().get("services", {})
+            # Check if there are any changes to services
+            if services != layer["services"]:
+                # Changes were made, add the new layer
+                container.add_layer("char", layer, combine=True)
+                logging.info("Added updated layer 'char' to Pebble plan")
+                # Restart it and report a new status to Juju
+                container.restart("char")
+                logging.info("Restarted char service")
+            # All is well, set an ActiveStatus
+            self.unit.status = ActiveStatus()
+        else:
+            self.unit.status = WaitingStatus("waiting for Pebble in workload container")
+
+    def _char_layer(self):
+        """Returns a Pebble configration layer for Char"""
+        env = {
+            "ENEMIES": self.model.config["enemies"],
+            "UVICORN_PORT": self.model.config["port"],
+            "NAME": self.model.config["name"]
+        }
+        print(env)
+
+        return {
             "summary": "char layer",
             "description": "pebble config layer for char",
             "services": {
                 "char": {
                     "override": "replace",
-                    "summary": "char",
+                    "summary": "char server",
                     "command": "./main.sh",
                     "startup": "enabled",
-                    "environment": {
-                        "enemies": self.model.config["enemies"],
-                        "port": self.model.config["port"],
-                        "name": self.model.config["name"]
-                    },
+                    "environment": env,
                 }
             },
         }
-        # Add initial Pebble config layer using the Pebble API
-        container.add_layer("char", pebble_layer, combine=True)
-        # Autostart any services that were defined with startup: enabled
-        container.autostart()
-        # Learn more about statuses in the SDK docs:
-        # https://juju.is/docs/sdk/constructs#heading--statuses
-        self.unit.status = ActiveStatus()
-
-    def _on_config_changed(self, event):
-        """ Learn more about config at https://juju.is/docs/sdk/config
-        """
-        container: Container = self.unit.get_container('char')
-        if container.can_connect():
-            layer = {
-                "services": {
-                    "char": {
-                        "override": "merge",
-                        "environment": {
-                            "enemies": self.model.config["enemies"],
-                            "port": self.model.config["port"],
-                            "name": self.model.config["name"]
-                        },
-                    }
-                },
-            }
-
-            container.add_layer('char', layer, combine=True)
-            container.restart("char")
 
     def _on_war_action(self, _):
         """ Let the bloodbath begin. Throws a pebble at some char, causing it to
