@@ -308,7 +308,7 @@ class CharCharm(CharmBase):
 
         for host in chain(['localhost:8080'], self.enemies):
             name, hp = get_name_and_hp(f"http://{host}")
-            statuses[name] = hp
+            statuses[f"{name}@{host}"] = hp
 
         logging.info(f"SITREP:"
                      f"{json.dumps(statuses, indent=2)}")
