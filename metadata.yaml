@@ -25,6 +25,11 @@ provides:
     interface: sees
     limit: 1
 
+peers:
+  replicas:
+    interface: charm-replica
+
 requires:
-  ingress:
-    interface: ingress
+  host-system:
+    interface: juju-info
+    scope: container
