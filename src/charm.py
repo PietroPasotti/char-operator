@@ -2,113 +2,67 @@
 # Copyright 2022 pietro
 # See LICENSE file for licensing details.
 
+import json
 import logging
-from urllib import request, parse
+from itertools import chain
+from typing import Optional, List
 import kubernetes.client
+import requests
 
-from ops.charm import (
-    CharmBase,
-    RelationDepartedEvent,
-    RelationChangedEvent,
-    RelationJoinedEvent,
-    LeaderElectedEvent
-)
-from ops.framework import StoredState
+from ops.charm import CharmBase
+
 from ops.main import main
-from ops.model import ActiveStatus, WaitingStatus, BlockedStatus
+from ops.model import (
+    ActiveStatus, WaitingStatus, Relation, MaintenanceStatus
+)
+from ops.pebble import Layer
 
 logger = logging.getLogger(__name__)
 
 
-def _core_v1_api():
-    """Use the v1 k8s API."""
-    return kubernetes.client.CoreV1Api()
-
-
-def _networking_v1_api():
-    """Use the v1 beta1 networking API."""
-    return kubernetes.client.NetworkingV1Api()
-
-
 class CharCharm(CharmBase):
     """Charm the service."""
-
-    _stored = StoredState()
+    _container_name = _layer_name = _service_name = "char"
+    _peer_relation_name = "replicas"
+    _port = 8080
 
     def __init__(self, *args):
         super().__init__(*args)
+
+        self.container = self.unit.get_container(self._container_name)
+
+        # Core lifecycle events
+        self.framework.observe(self.on.config_changed, self._on_config_changed)
+        self.framework.observe(self.on.char_pebble_ready,
+                               self._on_pebble_ready)
+        self.framework.observe(self.on.start, self._on_start)
+        # self.framework.observe(self.on.update_status, self._on_update_status)
+        # self.framework.observe(self.on.upgrade_charm, self._on_upgrade_charm)
+
+        # Peer relation events
         self.framework.observe(
-            self.on.config_changed,
-            self._on_config_changed)
+            self.on[self._peer_relation_name].relation_joined,
+            self._on_peer_relation_joined
+        )
         self.framework.observe(
-            self.on.war_action,
-            self._on_war_action)
-        self.framework.observe(
-            self.on.respawn_action,
-            self._on_respawn_action)
+            self.on[self._peer_relation_name].relation_changed,
+            self._on_peer_relation_changed
+        )
 
-        # Handle the case where Juju elects a new application leader
-        self.framework.observe(
-            self.on.leader_elected,
-            self._on_leader_elected)
-        # Handle the various relation events
-        self.framework.observe(
-            self.on.replicas_relation_joined,
-            self._on_replicas_relation_joined)
-        self.framework.observe(
-            self.on.replicas_relation_departed,
-            self._on_replicas_relation_departed)
-        self.framework.observe(
-            self.on.replicas_relation_changed,
-            self._on_replicas_relation_changed)
+        # Action events
+        self.framework.observe(self.on.war_action, self._on_war_action)
+        self.framework.observe(self.on.respawn_action, self._on_respawn_action)
+        self.framework.observe(self.on.glob_status_action,
+                               self._on_glob_status_action)
 
-        self._stored.set_default(leader_ip="")
+    @property
+    def enemies(self) -> List[str]:
+        return self._get_peer_addresses()
 
-        self._service_port = self.config["port"]
+    def _update(self, event):
+        """Update the state"""
 
-    def _on_leader_elected(self, event: LeaderElectedEvent) -> None:
-        """Handle the leader-elected event"""
-        logging.debug("Leader %s setting some data!", self.unit.name)
-        # Get the peer relation object
-        peer_relation = self.model.get_relation("replicas")
-        # Get the bind address from the juju model
-        # Convert to string as relation data must always be a string
-        ip = str(self.model.get_binding(peer_relation).network.bind_address)
-        # Update some data to trigger a replicas_relation_changed event
-        peer_relation.data[self.app].update({"leader-ip": ip})
-
-    def _on_replicas_relation_joined(self, event: RelationJoinedEvent) -> None:
-        """Handle relation-joined event for the replicas relation"""
-        logger.debug("Hello from %s to %s", self.unit.name, event.unit.name)
-
-        # Check if we're the leader
-        if self.unit.is_leader():
-            # Get the bind address from the juju model
-            ip = str(self.model.get_binding(event.relation).network.bind_address)
-            logging.debug("Leader %s setting some data!", self.unit.name)
-            event.relation.data[self.app].update({"leader-ip": ip})
-
-        # Update our unit data bucket in the relation
-        event.relation.data[self.unit].update({"unit-data": self.unit.name})
-
-    def _on_replicas_relation_departed(self, event: RelationDepartedEvent) -> None:
-        """Handle relation-departed event for the replicas relation"""
-        logger.debug("Goodbye from %s to %s", self.unit.name, event.unit.name)
-
-    def _on_replicas_relation_changed(self, event: RelationChangedEvent) -> None:
-        """Handle relation-changed event for the replicas relation"""
-        logging.debug("Unit %s can see the following data: %s", self.unit.name,
-                      event.relation.data.keys())
-        # Fetch an item from the application data bucket
-        leader_ip_value = event.relation.data[self.app].get("leader-ip")
-        # Store the latest copy locally in our state store
-        if leader_ip_value and leader_ip_value != self._stored.leader_ip:
-            self._stored.leader_ip = leader_ip_value
-
-    def _on_config_changed(self, event):
-        """Handle the config-changed event"""
-        # Get the char container so we can configure/manipulate it
-        container = self.unit.get_container("char")
+        container = self.container
         # Create a new config layer
         layer = self._char_layer()
 
@@ -116,7 +70,7 @@ class CharCharm(CharmBase):
             # Get the current config
             services = container.get_plan().to_dict().get("services", {})
             # Check if there are any changes to services
-            if services != layer["services"]:
+            if services != layer.services:
                 # Changes were made, add the new layer
                 container.add_layer("char", layer, combine=True)
                 logging.info("Added updated layer 'char' to Pebble plan")
@@ -136,42 +90,228 @@ class CharCharm(CharmBase):
     # Actual char stuff
     def _char_layer(self):
         """Returns a Pebble configration layer for Char"""
-        env = {
-            "ENEMIES": self.config["enemies"],
-            "UVICORN_PORT": self.config["port"],
-            "NAME": self.config["name"]
-        }
-        logging.error(str(env))
 
-        return {
+        enemies = ';'.join(self.enemies)
+        logging.info(f"enemies: {enemies}")
+
+        env = {
+            "ENEMIES": enemies,
+            "UVICORN_PORT": self.config["port"],
+            "NAME": self.config["name"],
+            "LOGLEVEL": "INFO"  # could expose to config
+        }
+        logging.info(str(env))
+
+        return Layer({
             "summary": "char layer",
             "description": "pebble config layer for char",
             "services": {
                 "char": {
                     "override": "replace",
-                    "summary": "char server",
+                    "summary": "char service",
                     "command": "./main.sh",
                     "startup": "enabled",
                     "environment": env,
                 }
             },
-        }
+        })
 
+    # source: https://github.com/canonical/alertmanager-k8s-operator
+    def _restart_service(self) -> bool:
+        """Helper function for restarting the underlying service.
+        Returns:
+            True if restart succeeded; False otherwise.
+        """
+        logger.info("Restarting service %s", self._service_name)
+
+        if not self.container.can_connect():
+            logger.error("Cannot (re)start service: container is not ready.")
+            return False
+
+        # Check if service exists, to avoid ModelError from being raised when the service does
+        # not exist,
+        if not self.container.get_plan().services.get(self._service_name):
+            logger.error(
+                "Cannot (re)start service: service does not (yet) exist.")
+            return False
+
+        self.container.restart(self._service_name)
+
+        # Update "launched with peers" flag.
+        # The service should be restarted when peers joined if this is False.
+        # plan = self.container.get_plan()
+        # service = plan.services.get(self._service_name)
+        # self._stored.launched_with_peers = "--cluster.peer" in service.command
+
+        return True
+
+    def _update_layer(self, restart: bool) -> bool:
+        """Update service layer to reflect changes in peers (replicas).
+        Args:
+          restart: a flag indicating if the service should be restarted if a change was detected.
+        Returns:
+          True if anything changed; False otherwise
+        """
+        overlay = self._char_layer()
+        plan = self.container.get_plan()
+
+        if self._service_name not in plan.services or overlay.services != plan.services:
+            self.container.add_layer(self._layer_name, overlay, combine=True)
+
+            if restart:
+                self._restart_service()
+
+            return True
+
+        return False
+
+    @property
+    def peer_relation(self) -> Relation:
+        """Helper function for obtaining the peer relation object.
+        Returns: peer relation object
+        (NOTE: would return None if called too early, e.g. during install).
+        """
+        return self.model.get_relation(self._peer_relation_name)
+
+    @property
+    def private_address(self) -> Optional[str]:
+        """Get the unit's ip address.
+        Technically, receiving a "joined" event guarantees an IP address is available. If this is
+        called beforehand, a None would be returned.
+        When operating a single unit, no "joined" events are visible so obtaining an address is a
+        matter of timing in that case.
+        This function is still needed in Juju 2.9.5 because the "private-address" field in the
+        data bag is being populated by the app IP instead of the unit IP.
+        Also in Juju 2.9.5, ip address may be None even after RelationJoinedEvent, for which
+        "ops.model.RelationDataError: relation data values must be strings" would be emitted.
+        Returns:
+          None if no IP is available (called before unit "joined"); unit's ip address otherwise
+        """
+        # if bind_address := check_output(["unit-get", "private-address"]).decode().strip()
+        if bind_address := self.model.get_binding(self._peer_relation_name
+                                                  ).network.bind_address:
+            bind_address = str(bind_address)
+        return bind_address
+
+    def _common_exit_hook(self) -> None:
+        """Event processing hook that is common to all events to ensure idempotency."""
+        if not self.container.can_connect():
+            self.unit.status = MaintenanceStatus(
+                "Waiting for pod startup to complete")
+            return
+
+        # Wait for IP address. IP address is needed for forming char clusters
+        # and for related apps' config.
+        if not self.private_address:
+            self.unit.status = MaintenanceStatus("Waiting for IP address")
+            return
+
+        # In the case of a single unit deployment, no 'RelationJoined' event is emitted, so
+        # setting IP here.
+        # Store private address in unit's peer relation data bucket. This is still needed because
+        # the "private-address" field in the data bag is being populated incorrectly.
+        # Also, ip address may still be None even after RelationJoinedEvent, for which
+        # "ops.model.RelationDataError: relation data values must be strings" would be emitted.
+        if self.peer_relation:
+            self.peer_relation.data[self.unit][
+                "private_address"] = self.private_address
+
+        # Update pebble layer
+        layer_changed = self._update_layer(restart=False)
+
+        service_running = (
+                              service := self.container.get_service(
+                                  self._service_name)
+                          ) and service.is_running()
+
+        if peer_relation := self.peer_relation:
+            num_peers = len(peer_relation.units)
+
+            if layer_changed and (
+                    not service_running or num_peers > 0
+            ):
+                self._restart_service()
+        self.unit.status = ActiveStatus()
+
+    def _on_pebble_ready(self, _):
+        """Event handler for PebbleReadyEvent."""
+        self._common_exit_hook()
+
+    def _on_config_changed(self, _):
+        """Event handler for ConfigChangedEvent."""
+        self._common_exit_hook()
+
+    def _on_start(self, _):
+        """Event handler for StartEvent.
+        With Juju 2.9.5 encountered a scenario in which pebble_ready and config_changed fired,
+        but IP address was not available and the status was stuck on "Waiting for IP address".
+        Adding this hook reduce the likelihood of that scenario.
+        """
+        self._common_exit_hook()
+
+    def _on_peer_relation_joined(self, _):
+        """Event handler for replica's RelationChangedEvent."""
+        self._common_exit_hook()
+
+    def _on_peer_relation_changed(self, _):
+        """Event handler for replica's RelationChangedEvent.
+        `relation_changed` is needed in addition to `relation_joined` because when a second unit
+        joins, the first unit must be restarted and provided with the second unit's IP address.
+        when the first unit sees "joined", it is not guaranteed that the second unit already has
+        an IP address.
+        """
+        self._common_exit_hook()
+
+    def _get_peer_addresses(self) -> List[str]:
+        """Create a list of HA addresses of all peer units (all units excluding current).
+        The returned addresses include the HA port number but do not include scheme (http).
+        If a unit does not have an address, it will be omitted from the list.
+        """
+        addresses = []
+        if pr := self.peer_relation:
+            addresses = [
+                f"{address}:{self._port}"
+                for unit in pr.units
+                # pr.units only holds peers (self.unit is not included)
+                if (address := pr.data[unit].get("private_address"))
+            ]
+
+        return addresses
+
+    # ACTIONS
     def _on_war_action(self, _):
         """ Let the bloodbath begin. Throws a pebble at some char, causing it to
         lash out to all other chars in sight, which will retaliate, etc...
         https://juju.is/docs/sdk/actions
         """
-        url = "http://localhost:8080/attack"
-        data = parse.urlencode({'damage': 0}).encode()
-        req = request.Request(url, data=data)
-        request.urlopen(req)
+        url = "http://localhost:8080/attack/?damage=1"
+        try:
+            requests.post(url)
+        except Exception as e:
+            logger.error(f"failed to contact the local char server; check "
+                         f"your connectivity! {e}")
 
     def _on_respawn_action(self, _):
         """ Revives a dead char.
         """
-        container = self.unit.get_container('char')
-        container.restart("char")
+        self._restart_service()
+
+    def _on_glob_status_action(self, _):
+        """ reports the status of all chars in the cluster
+        """
+        statuses = {}
+
+        def get_name_and_hp(url):
+            resp = requests.get(url + '/status')
+            jsn = resp.json()
+            return jsn['name'], jsn['hp']
+
+        for host in chain(['localhost'], self.enemies):
+            name, hp = get_name_and_hp(f"http://{host}:8080")
+            statuses[name] = hp
+
+        logging.info(f"SITREP:"
+                     f"{json.dumps(statuses, indent=2)}")
 
 
 if __name__ == "__main__":

@@ -20,16 +20,6 @@ resources:
     type: oci-image
     description: OCI image for char
 
-provides:
-  sees:
-    interface: sees
-    limit: 1
-
 peers:
   replicas:
-    interface: charm-replica
-
-requires:
-  host-system:
-    interface: juju-info
-    scope: container
+    interface: sees

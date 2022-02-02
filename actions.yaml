@@ -10,6 +10,8 @@
 war:
   description: Initiates the bloodbath.
 
-
 respawn:
   description: Revives the hero.
+
+glob-status:
+  description: Sitrep of the cluster.
