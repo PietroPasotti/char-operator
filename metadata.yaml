@@ -22,4 +22,4 @@ resources:
 
 peers:
   replicas:
-    interface: sees
+    interface: replicas

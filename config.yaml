@@ -16,7 +16,15 @@ options:
     default: 8080
     description: Port on which this char is available.
     type: int
+  host:
+    default: 0.0.0.0
+    description: Hostname for uvicorn.
+    type: string
   name:
     default: hero
     description: Name of this char. E.g. ork, elf, Legolas, Mark...
+    type: string
+  loglevel:
+    default: WARNING
+    description: Loglevel for Char.
     type: string

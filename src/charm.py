@@ -6,16 +6,15 @@ import json
 import logging
 from itertools import chain
 from typing import Optional, List
-import kubernetes.client
 import requests
 
 from ops.charm import CharmBase
 
 from ops.main import main
 from ops.model import (
-    ActiveStatus, WaitingStatus, Relation, MaintenanceStatus
+    ActiveStatus, WaitingStatus, Relation, MaintenanceStatus, Container
 )
-from ops.pebble import Layer
+from ops.pebble import Layer, ChangeError
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class CharCharm(CharmBase):
     def __init__(self, *args):
         super().__init__(*args)
 
-        self.container = self.unit.get_container(self._container_name)
+        self.container: Container = self.unit.get_container(self._container_name)
 
         # Core lifecycle events
         self.framework.observe(self.on.config_changed, self._on_config_changed)
@@ -97,10 +96,12 @@ class CharCharm(CharmBase):
         env = {
             "ENEMIES": enemies,
             "UVICORN_PORT": self.config["port"],
+            "UVICORN_HOST": self.config["host"],
             "NAME": self.config["name"],
-            "LOGLEVEL": "INFO"  # could expose to config
+            "LOGLEVEL": self.config["loglevel"],
         }
-        logging.info(str(env))
+        logging.info(f"Initing pebble layer with env: {str(env)}")
+        logging.info(f"Enemies: {enemies}")
 
         return Layer({
             "summary": "char layer",
@@ -135,13 +136,12 @@ class CharCharm(CharmBase):
                 "Cannot (re)start service: service does not (yet) exist.")
             return False
 
-        self.container.restart(self._service_name)
-
-        # Update "launched with peers" flag.
-        # The service should be restarted when peers joined if this is False.
-        # plan = self.container.get_plan()
-        # service = plan.services.get(self._service_name)
-        # self._stored.launched_with_peers = "--cluster.peer" in service.command
+        try:
+            self.container.restart(self._service_name)
+        except ChangeError as e:
+            logger.error(f'Could not restart container; {e}; '
+                         f'starting it instead')
+            self.container.start(self._service_name)
 
         return True
 
@@ -202,7 +202,7 @@ class CharCharm(CharmBase):
 
         # Wait for IP address. IP address is needed for forming char clusters
         # and for related apps' config.
-        if not self.private_address:
+        if not (private_address := self.private_address):
             self.unit.status = MaintenanceStatus("Waiting for IP address")
             return
 
@@ -212,21 +212,26 @@ class CharCharm(CharmBase):
         # the "private-address" field in the data bag is being populated incorrectly.
         # Also, ip address may still be None even after RelationJoinedEvent, for which
         # "ops.model.RelationDataError: relation data values must be strings" would be emitted.
-        if self.peer_relation:
-            self.peer_relation.data[self.unit][
-                "private_address"] = self.private_address
+        if (peer_relation := self.peer_relation):
+            peer_relation.data[self.unit]["private_address"] = private_address
+            logger.debug(f"storing pvt address in databag: {private_address}")
+        else:
+            logger.debug('no peer relation to configure')
+
+        self._update_layer(True)
+        self.unit.status = ActiveStatus()
+        return
 
         # Update pebble layer
         layer_changed = self._update_layer(restart=False)
 
-        service_running = (
-                              service := self.container.get_service(
-                                  self._service_name)
-                          ) and service.is_running()
-
-        if peer_relation := self.peer_relation:
+        # retrieve again the peer_relation in case
+        # it has changed in the meantime
+        if (peer_relation := self.peer_relation):
             num_peers = len(peer_relation.units)
 
+            service = self.container.get_service(self._service_name)
+            service_running = service and service.is_running()
             if layer_changed and (
                     not service_running or num_peers > 0
             ):
@@ -260,6 +265,7 @@ class CharCharm(CharmBase):
         when the first unit sees "joined", it is not guaranteed that the second unit already has
         an IP address.
         """
+        logger.debug(f'peer relation changed; {self._get_peer_addresses()}')
         self._common_exit_hook()
 
     def _get_peer_addresses(self) -> List[str]:
