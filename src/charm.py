@@ -157,6 +157,7 @@ class CharCharm(CharmBase):
         Returns:
           None if no IP is available (called before unit "joined"); unit's ip address otherwise
         """
+
         # if bind_address := check_output(["unit-get", "private-address"]).decode().strip()
         if bind_address := self.model.get_binding(self._peer_relation_name
                                                   ).network.bind_address:
@@ -223,24 +224,26 @@ class CharCharm(CharmBase):
         return addresses
 
     # ACTIONS
-    def _on_war_action(self, _):
+    def _on_war_action(self, event):
         """ Let the bloodbath begin. Throws a pebble at some char, causing it to
         lash out to all other chars in sight, which will retaliate, etc...
         https://juju.is/docs/sdk/actions
         """
-        url = "http://localhost:8080/attack/?damage=1"
+        url = f"http://localhost:{self._port}/attack/?damage=1"
         try:
             requests.post(url)
         except Exception as e:
             logger.error(f"failed to contact the local char server; check "
                          f"your connectivity! {e}")
+        event.set_results({'result': 1})
 
-    def _on_respawn_action(self, _):
+    def _on_respawn_action(self, event):
         """ Revives a dead char.
         """
         self._restart_service()
+        event.set_results({'result': 1})
 
-    def _on_glob_status_action(self, _):
+    def _on_glob_status_action(self, event):
         """ reports the status of all chars in the cluster
         """
         statuses = {}
@@ -256,6 +259,8 @@ class CharCharm(CharmBase):
 
         logging.info(f"SITREP:"
                      f"{json.dumps(statuses, indent=2)}")
+        event.set_results({'result': 1})
+
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from charm import CharCharm
-from ops.model import ActiveStatus
+from ops.model import ActiveStatus, Network
 from ops.testing import Harness
 
 
@@ -31,32 +31,36 @@ class TestCharm(unittest.TestCase):
 
         self.assertTrue(action_event.set_results.called)
 
-    # def test_httpbin_pebble_ready(self):
-    #     # Check the initial Pebble plan is empty
-    #     initial_plan = self.harness.get_container_pebble_plan("httpbin")
-    #     self.assertEqual(initial_plan.to_yaml(), "{}\n")
-    #     # Expected plan after Pebble ready with default config
-    #     expected_plan = {
-    #         "services": {
-    #             "httpbin": {
-    #                 "override": "replace",
-    #                 "summary": "httpbin",
-    #                 "command": "gunicorn -b 0.0.0.0:80 httpbin:app -k gevent",
-    #                 "startup": "enabled",
-    #                 "environment": {"thing": "🎁"},
-    #             }
-    #         },
-    #     }
-    #     # Get the httpbin container from the model
-    #     container = self.harness.model.unit.get_container("httpbin")
-    #     # Emit the PebbleReadyEvent carrying the httpbin container
-    #     self.harness.charm.on.httpbin_pebble_ready.emit(container)
-    #     # Get the plan now we've run PebbleReady
-    #     updated_plan = self.harness.get_container_pebble_plan("httpbin").to_dict()
-    #     # Check we've got the plan we expected
-    #     self.assertEqual(expected_plan, updated_plan)
-    #     # Check the service was started
-    #     service = self.harness.model.unit.get_container("httpbin").get_service("httpbin")
-    #     self.assertTrue(service.is_running())
-    #     # Ensure we set an ActiveStatus with no message
-    #     self.assertEqual(self.harness.model.unit.status, ActiveStatus())
+    def test_config_changed(self):
+        def get_plan():
+            return self.harness.get_container_pebble_plan('char')
+
+        plan = get_plan()
+        self.assertEqual(plan.to_dict(), {})
+
+        binding = Mock(
+            network=Network(
+                {
+                    'bind-addresses': [
+                        {
+                            'interface-name': 'foo',
+                            'addresses': [{'value': '0.0.0.0'}]
+                        }
+                    ]
+                }
+            )
+        )
+        self.harness.charm.model.get_binding = Mock(return_value=binding)
+
+        self.harness.update_config({'enemies': '123;456'})
+
+        plan = get_plan()
+        expected = self.harness.charm._char_layer().to_dict()
+        expected.pop('summary', '')
+        expected.pop('description', '')
+
+        self.assertEqual(plan.to_dict(), expected)
+        self.assertIsInstance(self.harness.model.unit.status, ActiveStatus)
+
+        container = self.harness.model.unit.get_container('char')
+        self.assertTrue(container.get_service('char').is_running())
