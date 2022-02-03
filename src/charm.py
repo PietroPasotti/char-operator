@@ -9,12 +9,11 @@ from typing import Optional, List
 import requests
 
 from ops.charm import CharmBase
-
 from ops.main import main
 from ops.model import (
     ActiveStatus, WaitingStatus, Relation, MaintenanceStatus, Container
 )
-from ops.pebble import Layer, ChangeError
+from ops.pebble import Layer
 
 logger = logging.getLogger(__name__)
 
@@ -23,29 +22,28 @@ class CharCharm(CharmBase):
     """Charm the service."""
     _container_name = _layer_name = _service_name = "char"
     _peer_relation_name = "replicas"
+    _address_name = 'private-address-ip'
     _port = 8080
 
     def __init__(self, *args):
         super().__init__(*args)
 
-        self.container: Container = self.unit.get_container(self._container_name)
+        self.container: Container = self.unit.get_container(
+            self._container_name)
 
         # Core lifecycle events
-        self.framework.observe(self.on.config_changed, self._on_config_changed)
-        self.framework.observe(self.on.char_pebble_ready,
-                               self._on_pebble_ready)
+        self.framework.observe(self.on.config_changed, self._update)
+        self.framework.observe(self.on.char_pebble_ready, self._update)
         self.framework.observe(self.on.start, self._on_start)
-        # self.framework.observe(self.on.update_status, self._on_update_status)
-        # self.framework.observe(self.on.upgrade_charm, self._on_upgrade_charm)
 
         # Peer relation events
         self.framework.observe(
             self.on[self._peer_relation_name].relation_joined,
-            self._on_peer_relation_joined
+            self._update
         )
         self.framework.observe(
             self.on[self._peer_relation_name].relation_changed,
-            self._on_peer_relation_changed
+            self._update
         )
 
         # Action events
@@ -58,40 +56,11 @@ class CharCharm(CharmBase):
     def enemies(self) -> List[str]:
         return self._get_peer_addresses()
 
-    def _update(self, event):
-        """Update the state"""
-
-        container = self.container
-        # Create a new config layer
-        layer = self._char_layer()
-
-        if container.can_connect():
-            # Get the current config
-            services = container.get_plan().to_dict().get("services", {})
-            # Check if there are any changes to services
-            if services != layer.services:
-                # Changes were made, add the new layer
-                container.add_layer("char", layer, combine=True)
-                logging.info("Added updated layer 'char' to Pebble plan")
-                # Restart it and report a new status to Juju
-                container.restart("char")
-                logging.info("Restarted char service")
-            # All is well, set an ActiveStatus
-            self.unit.status = ActiveStatus()
-
-        else:
-            self.unit.status = WaitingStatus(
-                "waiting for Pebble in workload container")
-            return
-
-        self.unit.status = ActiveStatus()
-
     # Actual char stuff
     def _char_layer(self):
         """Returns a Pebble configration layer for Char"""
 
         enemies = ';'.join(self.enemies)
-        logging.info(f"enemies: {enemies}")
 
         env = {
             "ENEMIES": enemies,
@@ -108,7 +77,7 @@ class CharCharm(CharmBase):
             "description": "pebble config layer for char",
             "services": {
                 "char": {
-                    "override": "replace",
+                    "override": "merge",
                     "summary": "char service",
                     "command": "./main.sh",
                     "startup": "enabled",
@@ -136,13 +105,11 @@ class CharCharm(CharmBase):
                 "Cannot (re)start service: service does not (yet) exist.")
             return False
 
-        try:
-            self.container.restart(self._service_name)
-        except ChangeError as e:
-            logger.error(f'Could not restart container; {e}; '
-                         f'starting it instead')
-            self.container.start(self._service_name)
+        logger.info(
+            f"pebble env, {self.container.get_plan().services.get('char').environment}")
 
+        self.container.restart(self._service_name)
+        logger.info(f'restarted {self._service_name}')
         return True
 
     def _update_layer(self, restart: bool) -> bool:
@@ -155,7 +122,10 @@ class CharCharm(CharmBase):
         overlay = self._char_layer()
         plan = self.container.get_plan()
 
+        logger.info('updating layer')
+
         if self._service_name not in plan.services or overlay.services != plan.services:
+            logger.info('container.add_layer')
             self.container.add_layer(self._layer_name, overlay, combine=True)
 
             if restart:
@@ -193,8 +163,23 @@ class CharCharm(CharmBase):
             bind_address = str(bind_address)
         return bind_address
 
-    def _common_exit_hook(self) -> None:
-        """Event processing hook that is common to all events to ensure idempotency."""
+    def _on_start(self, _):
+        if not (peer_relation := self.peer_relation):
+            self.unit.status = WaitingStatus(
+                "waiting for peer relation to show up")
+            return
+
+        self.update_address_in_relation_data(peer_relation)
+
+    def update_address_in_relation_data(self, relation):
+        """stores this unit's private IP in the relation databag"""
+        relation.data[self.unit].update(
+            {self._address_name: self.private_address})
+        logger.info(f'stored {self.private_address} in relation databag')
+
+    def _update(self, _):
+        """Event handler for ConfigChangedEvent."""
+        logger.info('running _update')
         if not self.container.can_connect():
             self.unit.status = MaintenanceStatus(
                 "Waiting for pod startup to complete")
@@ -213,60 +198,13 @@ class CharCharm(CharmBase):
         # Also, ip address may still be None even after RelationJoinedEvent, for which
         # "ops.model.RelationDataError: relation data values must be strings" would be emitted.
         if (peer_relation := self.peer_relation):
-            peer_relation.data[self.unit]["private_address"] = private_address
-            logger.debug(f"storing pvt address in databag: {private_address}")
+            self.update_address_in_relation_data(peer_relation)
         else:
-            logger.debug('no peer relation to configure')
+            logger.info('no peer relation to configure')
 
         self._update_layer(True)
         self.unit.status = ActiveStatus()
         return
-
-        # Update pebble layer
-        layer_changed = self._update_layer(restart=False)
-
-        # retrieve again the peer_relation in case
-        # it has changed in the meantime
-        if (peer_relation := self.peer_relation):
-            num_peers = len(peer_relation.units)
-
-            service = self.container.get_service(self._service_name)
-            service_running = service and service.is_running()
-            if layer_changed and (
-                    not service_running or num_peers > 0
-            ):
-                self._restart_service()
-        self.unit.status = ActiveStatus()
-
-    def _on_pebble_ready(self, _):
-        """Event handler for PebbleReadyEvent."""
-        self._common_exit_hook()
-
-    def _on_config_changed(self, _):
-        """Event handler for ConfigChangedEvent."""
-        self._common_exit_hook()
-
-    def _on_start(self, _):
-        """Event handler for StartEvent.
-        With Juju 2.9.5 encountered a scenario in which pebble_ready and config_changed fired,
-        but IP address was not available and the status was stuck on "Waiting for IP address".
-        Adding this hook reduce the likelihood of that scenario.
-        """
-        self._common_exit_hook()
-
-    def _on_peer_relation_joined(self, _):
-        """Event handler for replica's RelationChangedEvent."""
-        self._common_exit_hook()
-
-    def _on_peer_relation_changed(self, _):
-        """Event handler for replica's RelationChangedEvent.
-        `relation_changed` is needed in addition to `relation_joined` because when a second unit
-        joins, the first unit must be restarted and provided with the second unit's IP address.
-        when the first unit sees "joined", it is not guaranteed that the second unit already has
-        an IP address.
-        """
-        logger.debug(f'peer relation changed; {self._get_peer_addresses()}')
-        self._common_exit_hook()
 
     def _get_peer_addresses(self) -> List[str]:
         """Create a list of HA addresses of all peer units (all units excluding current).
@@ -279,7 +217,7 @@ class CharCharm(CharmBase):
                 f"{address}:{self._port}"
                 for unit in pr.units
                 # pr.units only holds peers (self.unit is not included)
-                if (address := pr.data[unit].get("private_address"))
+                if (address := pr.data[unit].get(self._address_name))
             ]
 
         return addresses
